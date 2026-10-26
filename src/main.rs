@@ -1,3 +1,8 @@
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 use axum::{
     body::Body,
     extract::{Request, State},
@@ -10,27 +15,11 @@ use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioExecutor};
 
 type Client = hyper_util::client::legacy::Client<HttpConnector, Body>;
 
-const BACKEND: &str = "127.0.0.1:8080";
-
-
-async fn proxy(State(client):  State<Client>, mut req: Request) -> Result<Response, StatusCode> {
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
-
-    let uri = format!("http://{}{}", BACKEND, path_and_query);
-    *req.uri_mut() = Uri::try_from(uri).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-
-    let response = client
-        .request(req)
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    Ok(response.into_response())
-
-
+#[deriv(Clone)]
+struct AppState {
+    client: Client,
+    backends: Arc<Vec<String>>,
+    next: Arc<AtomicUsize>,
 }
 
 #[tokio::main]
