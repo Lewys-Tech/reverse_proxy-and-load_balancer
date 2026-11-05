@@ -8,9 +8,9 @@ use std::{
 
 use axum::{
     Router,
-    body::Body,
+    body::{Body, Bytes, to_bytes},
     extract::{Request, State},
-    http::{StatusCode, Uri},
+    http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
 
@@ -60,31 +60,65 @@ fn spawn_health_checks(backends: Arc<Vec<String>>, healthy: Arc<Vec<AtomicBool>>
     });
 }
 
-async fn proxy(State(state): State<AppState>, mut req: Request) -> Result<Response, StatusCode> {
-    let i = pick_backend(&state).ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let backend = &state.backends[i];
+fn build_request(
+    method: &Method,
+    headers: &HeaderMap,
+    backend: &str,
+    path_and_query: &str,
+    body: Bytes,
+) -> Result<axum::http::Request<Body>, StatusCode> {
+    let uri = Uri::try_from(format!("http://{}{}", backend, path_and_query))
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut req = axum::http::Request::builder()
+        .method(method.clone())
+        .uri(uri)
+        .body(Body::from(body))
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    *req.headers_mut() = headers.clone();
+    Ok(req)
+}
 
-    let path_and_query = req
-        .uri()
+async fn proxy(State(state): State<AppState>, req: Request) -> Result<Response, StatusCode> {
+    let (parts, body) = req.into_parts();
+    let body = to_bytes(body, 1024 * 1024)
+        .await
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    let path_and_query = parts
+        .uri
         .path_and_query()
         .map(|pq| pq.as_str())
-        .unwrap_or("/");
+        .unwrap_or("/")
+        .to_string();
 
-    let uri = format!("http://{}{}", backend, path_and_query);
-    *req.uri_mut() = Uri::try_from(uri).map_err(|_| StatusCode::BAD_REQUEST)?;
+    for _attempt in 0..2 {
+        let i = pick_backend(&state).ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let backend = &state.backends[i];
+        let req = build_request(
+            &parts.method,
+            &parts.headers,
+            backend,
+            &path_and_query,
+            body.clone(),
+        )?;
 
-    let mut response = state
-        .client
-        .request(req)
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?
-        .into_response();
+        match state.client.request(req).await {
+            Ok(res) => {
+                let mut response = res.into_response();
+                response
+                    .headers_mut()
+                    .insert("x-backend", backend.parse().unwrap());
+                return Ok(response);
+            }
 
-    response
-        .headers_mut()
-        .insert("x-backend", backend.parse().unwrap());
-
-    Ok(response)
+            Err(e) if e.is_connect() => {
+                state.healthy[i].store(false, Ordering::Relaxed);
+                println!("backend {} refused connection, marked DOWN", backend);
+                continue;
+            }
+            Err(_) => return Err(StatusCode::BAD_GATEWAY),
+        }
+    }
+    Err(StatusCode::BAD_GATEWAY)
 }
 
 #[tokio::main]
