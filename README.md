@@ -170,6 +170,14 @@ Implemented but not yet demonstrated:
 - [nginx `proxy_next_upstream`](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream)
 - [Cloudflare Pingora](https://github.com/cloudflare/pingora), a production Rust proxy
 
+
+---
+
+## Architecture
+<img width="1562" height="981" alt="image" src="https://github.com/user-attachments/assets/a16d6a3a-71d0-4159-9bd3-d6466fa828e9" />
+
+
+
 ---
 
 ## License
